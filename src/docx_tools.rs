@@ -38,9 +38,17 @@ impl DocxToolsProvider {
     ///
     /// # Returns
     /// A new `DocxToolsProvider` instance with the specified security settings.
+    ///
+    /// # Panics
+    /// This function will panic if `DocxHandler` initialization fails. In production,
+    /// consider using `try_new_with_security` for error handling.
     pub fn new_with_security(security_config: SecurityConfig) -> Self {
         Self {
-            handler: Arc::new(RwLock::new(DocxHandler::new().expect("Failed to create DocxHandler"))),
+            handler: Arc::new(RwLock::new(
+                DocxHandler::new().unwrap_or_else(|e| {
+                    panic!("Failed to create DocxHandler: {}. This is a critical initialization error.", e)
+                })
+            )),
             converter: Arc::new(DocumentConverter::new()),
             #[cfg(feature = "advanced-docx")]
             advanced: Arc::new(AdvancedDocxHandler::new()),
@@ -132,9 +140,17 @@ impl DocxToolsProvider {
     ///
     /// # Returns
     /// A new `DocxToolsProvider` instance with the specified base directory and security settings.
+    ///
+    /// # Panics
+    /// This function will panic if `DocxHandler` initialization fails. In production,
+    /// consider using a try-constructor pattern for error handling.
     pub fn with_base_dir_and_security<P: AsRef<std::path::Path>>(base_dir: P, security_config: SecurityConfig) -> Self {
         Self {
-            handler: Arc::new(RwLock::new(DocxHandler::new_with_base_dir(base_dir).expect("Failed to create DocxHandler"))),
+            handler: Arc::new(RwLock::new(
+                DocxHandler::new_with_base_dir(base_dir).unwrap_or_else(|e| {
+                    panic!("Failed to create DocxHandler with base directory: {}. This is a critical initialization error.", e)
+                })
+            )),
             converter: Arc::new(DocumentConverter::new()),
             #[cfg(feature = "advanced-docx")]
             advanced: Arc::new(AdvancedDocxHandler::new()),
@@ -1759,7 +1775,7 @@ impl DocxToolsProvider {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let search_term = arguments["search_term"].as_str().unwrap_or("");
                 let case_sensitive = arguments.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(false);
-                let _whole_word = arguments.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false);
+                let whole_word = arguments.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false);
                 
                 if search_term.is_empty() {
                     return CallToolResponse {
@@ -1798,6 +1814,35 @@ impl DocxToolsProvider {
                         
                         let mut matches = Vec::new();
                         
+                        // Helper function to check if a character is a word boundary
+                        let is_word_char = |c: char| -> bool {
+                            c.is_alphanumeric() || c == '_'
+                        };
+                        
+                        // Helper function to check word boundaries
+                        let check_word_boundary = |text: &str, pos: usize, search_len: usize, whole_word: bool| -> bool {
+                            if !whole_word {
+                                return true; // No word boundary check needed
+                            }
+                            
+                            // Check character before match
+                            let before_ok = if pos == 0 {
+                                true // Start of text is a word boundary
+                            } else {
+                                !is_word_char(text.chars().nth(pos.saturating_sub(1)).unwrap_or(' '))
+                            };
+                            
+                            // Check character after match
+                            let after_pos = pos + search_len;
+                            let after_ok = if after_pos >= text.chars().count() {
+                                true // End of text is a word boundary
+                            } else {
+                                !is_word_char(text.chars().nth(after_pos).unwrap_or(' '))
+                            };
+                            
+                            before_ok && after_ok
+                        };
+                        
                         // For case-insensitive search, we need to search in lowercase but use original positions
                         // Helper function to convert byte offset to character index
                         let byte_to_char_pos = |byte_offset: usize| -> usize {
@@ -1813,6 +1858,17 @@ impl DocxToolsProvider {
                                 // Convert byte offset to character index
                                 let char_pos = byte_to_char_pos(absolute_byte_pos);
                                 let char_count = text.chars().count();
+                                
+                                // Check word boundary if whole_word is enabled
+                                if whole_word && !check_word_boundary(&text, char_pos, search_for.chars().count(), true) {
+                                    // Advance byte position and continue
+                                    let next_byte_pos = absolute_byte_pos + search_for.len().max(1);
+                                    if next_byte_pos <= byte_position || next_byte_pos >= text.len() {
+                                        break;
+                                    }
+                                    byte_position = next_byte_pos;
+                                    continue;
+                                }
                                 
                                 // Find character boundaries for context
                                 let context_start_char = char_pos.saturating_sub(50);
@@ -1865,6 +1921,12 @@ impl DocxToolsProvider {
                                         .all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()));
                                     
                                     if matches_search {
+                                        // Check word boundary if whole_word is enabled
+                                        if whole_word && !check_word_boundary(&text, char_pos, search_chars.len(), true) {
+                                            char_pos += 1;
+                                            continue;
+                                        }
+                                        
                                         let char_count = text_chars.len();
                                         
                                         // Find character boundaries for context
@@ -1908,7 +1970,10 @@ impl DocxToolsProvider {
                         
                         ToolOutcome::Metadata { metadata: serde_json::json!({
                             "matches": matches,
-                            "total_matches": matches.len()
+                            "total_matches": matches.len(),
+                            "search_term": search_term,
+                            "case_sensitive": case_sensitive,
+                            "whole_word": whole_word
                         }) }
                     }
                     Err(e) => match e {
