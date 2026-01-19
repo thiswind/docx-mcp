@@ -87,12 +87,31 @@ impl DocxToolsProvider {
         })
     }
 
-    /// Create a provider that stores temporary documents under the provided base directory
+    /// Create a provider that stores temporary documents under the provided base directory.
+    ///
+    /// This is useful when you want to control where temporary DOCX files are stored,
+    /// for example, in a specific directory for cleanup or organization purposes.
+    ///
+    /// # Arguments
+    /// * `base_dir` - Base directory path where temporary documents will be stored
+    ///
+    /// # Returns
+    /// A new `DocxToolsProvider` instance with the specified base directory and default security settings.
     pub fn with_base_dir<P: AsRef<std::path::Path>>(base_dir: P) -> Self {
         Self::with_base_dir_and_security(base_dir, SecurityConfig::default())
     }
 
-    /// Create a provider with a base directory and explicit security config
+    /// Create a provider with a base directory and explicit security configuration.
+    ///
+    /// This method allows you to specify both the base directory for temporary document storage
+    /// and custom security settings in a single call.
+    ///
+    /// # Arguments
+    /// * `base_dir` - Base directory path where temporary documents will be stored
+    /// * `security_config` - Security configuration specifying readonly mode, whitelist/blacklist, etc.
+    ///
+    /// # Returns
+    /// A new `DocxToolsProvider` instance with the specified base directory and security settings.
     pub fn with_base_dir_and_security<P: AsRef<std::path::Path>>(base_dir: P, security_config: SecurityConfig) -> Self {
         Self {
             handler: Arc::new(RwLock::new(DocxHandler::new_with_base_dir(base_dir).expect("Failed to create DocxHandler"))),
