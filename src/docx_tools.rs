@@ -51,6 +51,7 @@ impl DocxToolsProvider {
 
     /// Safely acquire read lock and execute a closure
     /// Returns ToolOutcome::Error if lock acquisition fails (e.g., due to poison)
+    /// The closure can return anyhow::Error, which will be converted to appropriate ToolOutcome
     fn with_read_handler<F, R>(&self, f: F) -> Result<R, ToolOutcome>
     where
         F: FnOnce(&DocxHandler) -> Result<R, anyhow::Error>,
@@ -61,15 +62,12 @@ impl DocxToolsProvider {
                 error: format!("Failed to acquire read lock: {}", e),
                 hint: Some("The document handler may be in an inconsistent state. Try restarting the server.".to_string()),
             })?;
-        f(&handler).map_err(|e| ToolOutcome::Error {
-            code: ErrorCode::InternalError,
-            error: e.to_string(),
-            hint: None,
-        })
+        f(&handler).map_err(|e| Self::convert_error(e))
     }
 
     /// Safely acquire write lock and execute a closure
     /// Returns ToolOutcome::Error if lock acquisition fails (e.g., due to poison)
+    /// The closure can return anyhow::Error, which will be converted to appropriate ToolOutcome
     fn with_write_handler<F, R>(&self, f: F) -> Result<R, ToolOutcome>
     where
         F: FnOnce(&mut DocxHandler) -> Result<R, anyhow::Error>,
@@ -80,11 +78,33 @@ impl DocxToolsProvider {
                 error: format!("Failed to acquire write lock: {}", e),
                 hint: Some("The document handler may be in an inconsistent state. Try restarting the server.".to_string()),
             })?;
-        f(&mut handler).map_err(|e| ToolOutcome::Error {
-            code: ErrorCode::InternalError,
-            error: e.to_string(),
+        f(&mut handler).map_err(|e| Self::convert_error(e))
+    }
+
+    /// Convert anyhow::Error to appropriate ToolOutcome based on error message patterns
+    /// This preserves error intent by detecting common error patterns (e.g., "Document not found")
+    fn convert_error(e: anyhow::Error) -> ToolOutcome {
+        let error_msg = e.to_string();
+        let error_lower = error_msg.to_lowercase();
+        
+        // Detect specific error types from error messages
+        let code = if error_lower.contains("document not found") || error_lower.contains("no in-memory ops") {
+            ErrorCode::DocNotFound
+        } else if error_lower.contains("validation") || error_lower.contains("invalid") {
+            ErrorCode::ValidationError
+        } else if error_lower.contains("security") || error_lower.contains("denied") {
+            ErrorCode::SecurityDenied
+        } else if error_lower.contains("limit") || error_lower.contains("exceeded") {
+            ErrorCode::LimitExceeded
+        } else {
+            ErrorCode::InternalError
+        };
+        
+        ToolOutcome::Error {
+            code,
+            error: error_msg,
             hint: None,
-        })
+        }
     }
 
     /// Create a provider that stores temporary documents under the provided base directory.
@@ -1057,7 +1077,24 @@ impl DocxToolsProvider {
     /// A `CallToolResponse` containing either the successful result or an error message.
     /// The response is always in JSON format suitable for MCP protocol communication.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> CallToolResponse {
-        debug!("Calling tool: {} with arguments: {:?}", name, arguments);
+        // Redact sensitive arguments in logs - only log tool name and argument summary
+        let arg_summary = if arguments.is_object() {
+            if let Some(obj) = arguments.as_object() {
+                let keys: Vec<String> = obj.keys().map(|k| k.clone()).collect();
+                format!("{{keys: [{}], count: {}}}", keys.join(", "), obj.len())
+            } else {
+                "{}".to_string()
+            }
+        } else if arguments.is_array() {
+            if let Some(arr) = arguments.as_array() {
+                format!("[array with {} items]", arr.len())
+            } else {
+                "[]".to_string()
+            }
+        } else {
+            format!("{:?}", arguments)
+        };
+        debug!("Calling tool: {} with arguments: {}", name, arg_summary);
         
         // Security check
         if let Err(security_error) = self.security.check_command(name, &arguments) {

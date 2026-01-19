@@ -29,17 +29,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = DocxToolsProvider::new_with_security(SecurityConfig::default());
     
     println!("1. Opening document: {:?}", test_doc_path);
+    // Use to_string_lossy() to handle non-UTF8 paths safely
+    let path_str = test_doc_path.to_string_lossy().to_string();
     let open_result = provider.call_tool("open_document", json!({
-        "path": test_doc_path.to_str().unwrap()
+        "path": path_str
     })).await;
     
     let doc_id = match open_result.content.get(0) {
         Some(ToolResponseContent::Text(t)) => {
             let json_val: serde_json::Value = serde_json::from_str(&t.text)?;
             if json_val["success"].as_bool().unwrap_or(false) {
-                let id = json_val["document_id"].as_str().unwrap();
-                println!("   ✓ Document opened successfully, ID: {}", id);
-                id.to_string()
+                // Safely extract document_id with proper error handling
+                match json_val["document_id"].as_str() {
+                    Some(id) => {
+                        println!("   ✓ Document opened successfully, ID: {}", id);
+                        id.to_string()
+                    }
+                    None => {
+                        eprintln!("   ✗ Failed to open document: missing document_id in response");
+                        return Ok(());
+                    }
+                }
             } else {
                 eprintln!("   ✗ Failed to open document: {}", json_val["error"].as_str().unwrap_or("Unknown error"));
                 return Ok(());
