@@ -38,6 +38,44 @@ impl DocxToolsProvider {
         }
     }
 
+    /// Safely acquire read lock and execute a closure
+    /// Returns ToolOutcome::Error if lock acquisition fails (e.g., due to poison)
+    fn with_read_handler<F, R>(&self, f: F) -> Result<R, ToolOutcome>
+    where
+        F: FnOnce(&DocxHandler) -> Result<R, anyhow::Error>,
+    {
+        let handler = self.handler.read()
+            .map_err(|e| ToolOutcome::Error {
+                code: ErrorCode::InternalError,
+                error: format!("Failed to acquire read lock: {}", e),
+                hint: Some("The document handler may be in an inconsistent state. Try restarting the server.".to_string()),
+            })?;
+        f(&handler).map_err(|e| ToolOutcome::Error {
+            code: ErrorCode::InternalError,
+            error: e.to_string(),
+            hint: None,
+        })
+    }
+
+    /// Safely acquire write lock and execute a closure
+    /// Returns ToolOutcome::Error if lock acquisition fails (e.g., due to poison)
+    fn with_write_handler<F, R>(&self, f: F) -> Result<R, ToolOutcome>
+    where
+        F: FnOnce(&mut DocxHandler) -> Result<R, anyhow::Error>,
+    {
+        let mut handler = self.handler.write()
+            .map_err(|e| ToolOutcome::Error {
+                code: ErrorCode::InternalError,
+                error: format!("Failed to acquire write lock: {}", e),
+                hint: Some("The document handler may be in an inconsistent state. Try restarting the server.".to_string()),
+            })?;
+        f(&mut handler).map_err(|e| ToolOutcome::Error {
+            code: ErrorCode::InternalError,
+            error: e.to_string(),
+            hint: None,
+        })
+    }
+
     /// Create a provider that stores temporary documents under the provided base directory
     pub fn with_base_dir<P: AsRef<std::path::Path>>(base_dir: P) -> Self {
         Self::with_base_dir_and_security(base_dir, SecurityConfig::default())
@@ -985,19 +1023,20 @@ impl DocxToolsProvider {
         
         let outcome = match name {
             "create_document" => {
-                let mut handler = self.handler.write().unwrap();
-                match handler.create_document() {
+                match self.with_write_handler(|handler| handler.create_document()) {
                     Ok(doc_id) => ToolOutcome::Created { document_id: doc_id, message: Some("Document created successfully".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::InternalError, error: e.to_string(), hint: None },
+                    Err(e) => e,
                 }
             },
             
             "open_document" => {
                 let path = arguments["path"].as_str().unwrap_or("");
-                let mut handler = self.handler.write().unwrap();
-                match handler.open_document(&PathBuf::from(path)) {
+                match self.with_write_handler(|handler| handler.open_document(&PathBuf::from(path))) {
                     Ok(doc_id) => ToolOutcome::Created { document_id: doc_id, message: Some(format!("Document opened from {}", path)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to open document: {}", path), hint: None },
+                    },
                 }
             },
             
@@ -1009,10 +1048,12 @@ impl DocxToolsProvider {
                     serde_json::from_value::<DocxStyle>(s.clone()).ok()
                 });
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_paragraph(doc_id, text, style) {
+                match self.with_write_handler(|handler| handler.add_paragraph(doc_id, text, style)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Paragraph added successfully".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add paragraph"), hint: None },
+                    },
                 }
             },
             
@@ -1021,10 +1062,12 @@ impl DocxToolsProvider {
                 let text = arguments["text"].as_str().unwrap_or("");
                 let level = arguments["level"].as_u64().unwrap_or(1) as usize;
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_heading(doc_id, text, level) {
+                match self.with_write_handler(|handler| handler.add_heading(doc_id, text, level)) {
                     Ok(_) => ToolOutcome::Ok { message: Some(format!("Heading level {} added successfully", level)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add heading"), hint: None },
+                    },
                 }
             },
             
@@ -1077,10 +1120,12 @@ impl DocxToolsProvider {
                     cell_shading: arguments.get("cell_shading").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 };
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_table(doc_id, table_data) {
+                match self.with_write_handler(|handler| handler.add_table(doc_id, table_data)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Table added successfully".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add table"), hint: None },
+                    },
                 }
             },
 
@@ -1095,10 +1140,12 @@ impl DocxToolsProvider {
                     right: m.get("right").and_then(|v| v.as_f64()).map(|v| v as f32),
                 });
 
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_section_break(doc_id, page_size, orientation, margins) {
+                match self.with_write_handler(|handler| handler.add_section_break(doc_id, page_size, orientation, margins)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Section break added".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add section break"), hint: None },
+                    },
                 }
             },
             
@@ -1115,10 +1162,12 @@ impl DocxToolsProvider {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_list(doc_id, items, ordered) {
+                match self.with_write_handler(|handler| handler.add_list(doc_id, items, ordered)) {
                     Ok(_) => ToolOutcome::Ok { message: Some(format!("{} list added successfully", if ordered { "Ordered" } else { "Unordered" })) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add list"), hint: None },
+                    },
                 }
             },
 
@@ -1128,20 +1177,24 @@ impl DocxToolsProvider {
                 let level = arguments.get("level").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let ordered = arguments.get("ordered").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_list_item(doc_id, text, level, ordered) {
+                match self.with_write_handler(|handler| handler.add_list_item(doc_id, text, level, ordered)) {
                     Ok(_) => ToolOutcome::Ok { message: Some(format!("List item (level {}) added", level)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add list item"), hint: None },
+                    },
                 }
             },
             
             "add_page_break" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_page_break(doc_id) {
+                match self.with_write_handler(|handler| handler.add_page_break(doc_id)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Page break added successfully".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add page break"), hint: None },
+                    },
                 }
             },
             "insert_toc" => {
@@ -1149,21 +1202,25 @@ impl DocxToolsProvider {
                 let from_level = arguments.get("from_level").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
                 let to_level = arguments.get("to_level").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
                 let right_align_dots = arguments.get("right_align_dots").and_then(|v| v.as_bool()).unwrap_or(true);
-                let mut handler = self.handler.write().unwrap();
-                match handler.insert_toc(doc_id, from_level, to_level, right_align_dots) {
+                match self.with_write_handler(|handler| handler.insert_toc(doc_id, from_level, to_level, right_align_dots)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("TOC placeholder inserted".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to insert TOC"), hint: None },
+                    },
                 }
             },
             "insert_bookmark_after_heading" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let heading_text = arguments["heading_text"].as_str().unwrap_or("");
                 let name = arguments["name"].as_str().unwrap_or("");
-                let mut handler = self.handler.write().unwrap();
-                match handler.insert_bookmark_after_heading(doc_id, heading_text, name) {
+                match self.with_write_handler(|handler| handler.insert_bookmark_after_heading(doc_id, heading_text, name)) {
                     Ok(true) => ToolOutcome::Ok { message: Some("Bookmark inserted".into()) },
                     Ok(false) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: "Heading not found".into(), hint: None },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to insert bookmark"), hint: None },
+                    },
                 }
             },
             
@@ -1171,10 +1228,12 @@ impl DocxToolsProvider {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let text = arguments["text"].as_str().unwrap_or("");
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.set_header(doc_id, text) {
+                match self.with_write_handler(|handler| handler.set_header(doc_id, text)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Header set successfully".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to set header"), hint: None },
+                    },
                 }
             },
             
@@ -1182,28 +1241,31 @@ impl DocxToolsProvider {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let text = arguments["text"].as_str().unwrap_or("");
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.set_footer(doc_id, text) {
+                match self.with_write_handler(|handler| handler.set_footer(doc_id, text)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Footer set successfully".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to set footer"), hint: None },
+                    },
                 }
             },
             "set_page_numbering" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let location = arguments.get("location").and_then(|v| v.as_str()).unwrap_or("footer");
                 let template = arguments.get("template").and_then(|v| v.as_str());
-                let mut handler = self.handler.write().unwrap();
-                match handler.set_page_numbering(doc_id, location, template) {
+                match self.with_write_handler(|handler| handler.set_page_numbering(doc_id, location, template)) {
                     Ok(_) => ToolOutcome::Ok { message: Some(format!("Page numbering set in {}", location)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to set page numbering"), hint: None },
+                    },
                 }
             },
             "embed_page_number_fields" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.embed_page_number_fields(doc_id) {
+                match self.with_read_handler(|handler| handler.embed_page_number_fields(doc_id)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Embedded PAGE/NUMPAGES fields (best-effort)".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::InternalError, error: e.to_string(), hint: None },
+                    Err(e) => e,
                 }
             },
 
@@ -1219,11 +1281,13 @@ impl DocxToolsProvider {
                     Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: format!("{{\"success\":false,\"error\":\"invalid base64: {}\"}}", e), annotations: None })], is_error: Some(true), meta: None },
                 };
 
-                let mut handler = self.handler.write().unwrap();
                 let image = crate::docx_handler::ImageData { data: image_data, width, height, alt_text };
-                match handler.add_image(doc_id, image) {
+                match self.with_write_handler(|handler| handler.add_image(doc_id, image)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Image added".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add image"), hint: None },
+                    },
                 }
             },
 
@@ -1231,10 +1295,12 @@ impl DocxToolsProvider {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let text = arguments["text"].as_str().unwrap_or("");
                 let url = arguments["url"].as_str().unwrap_or("");
-                let mut handler = self.handler.write().unwrap();
-                match handler.add_hyperlink(doc_id, text, url) {
+                match self.with_write_handler(|handler| handler.add_hyperlink(doc_id, text, url)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Hyperlink added".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to add hyperlink"), hint: None },
+                    },
                 }
             },
             
@@ -1243,10 +1309,12 @@ impl DocxToolsProvider {
                 let find_text = arguments["find_text"].as_str().unwrap_or("");
                 let replace_text = arguments["replace_text"].as_str().unwrap_or("");
                 
-                let mut handler = self.handler.write().unwrap();
-                match handler.find_and_replace(doc_id, find_text, replace_text) {
+                match self.with_write_handler(|handler| handler.find_and_replace(doc_id, find_text, replace_text)) {
                     Ok(count) => ToolOutcome::Ok { message: Some(format!("Replaced {} occurrences", count)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to find and replace"), hint: None },
+                    },
                 }
             },
 
@@ -1258,10 +1326,12 @@ impl DocxToolsProvider {
                 let whole_word = arguments.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false);
                 let use_regex = arguments.get("use_regex").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                let mut handler = self.handler.write().unwrap();
-                match handler.find_and_replace_advanced(doc_id, pattern, replacement, case_sensitive, whole_word, use_regex) {
+                match self.with_write_handler(|handler| handler.find_and_replace_advanced(doc_id, pattern, replacement, case_sensitive, whole_word, use_regex)) {
                     Ok(count) => ToolOutcome::Ok { message: Some(format!("Replaced {} occurrences", count)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to find and replace"), hint: None },
+                    },
                 }
             },
             "apply_paragraph_format" => {
@@ -1278,98 +1348,112 @@ impl DocxToolsProvider {
                     alignment: fmt.get("alignment").and_then(|v| v.as_str()).map(|s| s.to_string()),
                     line_spacing: fmt.get("line_spacing").and_then(|v| v.as_f64()).map(|v| v as f32),
                 };
-                let mut handler = self.handler.write().unwrap();
-                match handler.apply_paragraph_format(doc_id, contains, style) {
+                match self.with_write_handler(|handler| handler.apply_paragraph_format(doc_id, contains, style)) {
                     Ok(count) => ToolOutcome::Ok { message: Some(format!("Updated {} paragraph(s)", count)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to apply paragraph format"), hint: None },
+                    },
                 }
             },
             
             "extract_text" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                
-                let handler = self.handler.read().unwrap();
-                match handler.extract_text(doc_id) {
+                match self.with_read_handler(|handler| handler.extract_text(doc_id)) {
                     Ok(text) => ToolOutcome::Text { text },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "get_tables" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.get_tables_json(doc_id) {
+                match self.with_read_handler(|handler| handler.get_tables_json(doc_id)) {
                     Ok(json) => ToolOutcome::Metadata { metadata: json },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "list_images" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.list_images(doc_id) {
+                match self.with_read_handler(|handler| handler.list_images(doc_id)) {
                     Ok(json) => ToolOutcome::Metadata { metadata: json },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "list_hyperlinks" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.list_hyperlinks(doc_id) {
+                match self.with_read_handler(|handler| handler.list_hyperlinks(doc_id)) {
                     Ok(json) => ToolOutcome::Metadata { metadata: json },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "get_fields_summary" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.get_fields_summary(doc_id) {
+                match self.with_read_handler(|handler| handler.get_fields_summary(doc_id)) {
                     Ok(json) => ToolOutcome::Metadata { metadata: json },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "strip_personal_info" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let mut handler = self.handler.write().unwrap();
-                match handler.strip_personal_info(doc_id) {
+                match self.with_write_handler(|handler| handler.strip_personal_info(doc_id)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Personal info stripped".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::InternalError, error: e.to_string(), hint: None },
+                    Err(e) => e,
                 }
             },
             
             "get_metadata" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                
-                let handler = self.handler.read().unwrap();
-                match handler.get_metadata(doc_id) {
-                    Ok(metadata) => ToolOutcome::Metadata { metadata: serde_json::to_value(metadata).unwrap() },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                match self.with_read_handler(|handler| handler.get_metadata(doc_id)) {
+                    Ok(metadata) => ToolOutcome::Metadata { metadata: serde_json::to_value(metadata).unwrap_or_else(|_| json!({"error": "Failed to serialize metadata"})) },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             
             "save_document" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let output_path = arguments["output_path"].as_str().unwrap_or("");
-                
-                let handler = self.handler.read().unwrap();
-                match handler.save_document(doc_id, &PathBuf::from(output_path)) {
+                match self.with_read_handler(|handler| handler.save_document(doc_id, &PathBuf::from(output_path))) {
                     Ok(_) => ToolOutcome::Ok { message: Some(format!("Document saved to {}", output_path)) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to save document"), hint: None },
+                    },
                 }
             },
             
             "close_document" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                
-                let mut handler = self.handler.write().unwrap();
-                match handler.close_document(doc_id) {
+                match self.with_write_handler(|handler| handler.close_document(doc_id)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Document closed successfully".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             
             "list_documents" => {
-                let handler = self.handler.read().unwrap();
-                let documents = handler.list_documents();
-                ToolOutcome::Documents { documents: serde_json::to_value(documents).unwrap() }
+                match self.with_read_handler(|handler| Ok(handler.list_documents())) {
+                    Ok(documents) => ToolOutcome::Documents { documents: serde_json::to_value(documents).unwrap_or_else(|_| json!({"error": "Failed to serialize documents"})) },
+                    Err(e) => e,
+                }
             },
             
             "convert_to_pdf" => {
@@ -1377,10 +1461,9 @@ impl DocxToolsProvider {
                 let output_path = arguments["output_path"].as_str().unwrap_or("");
                 let prefer_external = arguments.get("prefer_external").and_then(|v| v.as_bool()).unwrap_or(false);
                 
-                let handler = self.handler.read().unwrap();
-                let metadata = match handler.get_metadata(doc_id) {
+                let metadata = match self.with_read_handler(|handler| handler.get_metadata(doc_id)) {
                     Ok(m) => m,
-                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: e.to_string(), annotations: None })], is_error: Some(true), meta: None },
+                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: format!("{{\"success\":false,\"error\":\"{}\"}}", match e { ToolOutcome::Error { error, .. } => error, _ => "Failed to get metadata".to_string() }), annotations: None })], is_error: Some(true), meta: None },
                 };
                 
                 match if prefer_external { self.converter.docx_to_pdf_with_preference(&metadata.path, &PathBuf::from(output_path), true) } else { self.converter.docx_to_pdf(&metadata.path, &PathBuf::from(output_path)) } {
@@ -1395,17 +1478,13 @@ impl DocxToolsProvider {
                 let prefer_external = arguments.get("prefer_external").and_then(|v| v.as_bool()).unwrap_or(true);
 
                 // Embed fields first
-                {
-                    let handler = self.handler.read().unwrap();
-                    if let Err(e) = handler.embed_page_number_fields(doc_id) {
-                        return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: serde_json::json!({"success": false, "error": e.to_string()}).to_string(), annotations: None })], is_error: Some(true), meta: None };
-                    }
+                if let Err(e) = self.with_read_handler(|handler| handler.embed_page_number_fields(doc_id)) {
+                    return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: serde_json::json!({"success": false, "error": match e { ToolOutcome::Error { error, .. } => error, _ => "Failed to embed fields".to_string() }}).to_string(), annotations: None })], is_error: Some(true), meta: None };
                 }
 
-                let handler = self.handler.read().unwrap();
-                let metadata = match handler.get_metadata(doc_id) {
+                let metadata = match self.with_read_handler(|handler| handler.get_metadata(doc_id)) {
                     Ok(m) => m,
-                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: serde_json::json!({"success": false, "error": e.to_string()}).to_string(), annotations: None })], is_error: Some(true), meta: None },
+                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: serde_json::json!({"success": false, "error": match e { ToolOutcome::Error { error, .. } => error, _ => "Failed to get metadata".to_string() }}).to_string(), annotations: None })], is_error: Some(true), meta: None },
                 };
 
                 let result = if prefer_external {
@@ -1430,10 +1509,9 @@ impl DocxToolsProvider {
                     .and_then(|d| d.as_u64())
                     .unwrap_or(150) as u32;
                 
-                let handler = self.handler.read().unwrap();
-                let metadata = match handler.get_metadata(doc_id) {
+                let metadata = match self.with_read_handler(|handler| handler.get_metadata(doc_id)) {
                     Ok(m) => m,
-                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: e.to_string(), annotations: None })], is_error: Some(true), meta: None },
+                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: format!("{{\"success\":false,\"error\":\"{}\"}}", match e { ToolOutcome::Error { error, .. } => error, _ => "Failed to get metadata".to_string() }), annotations: None })], is_error: Some(true), meta: None },
                 };
                 
                 let image_format = match format {
@@ -1460,10 +1538,9 @@ impl DocxToolsProvider {
                 let dpi = arguments.get("dpi").and_then(|d| d.as_u64()).unwrap_or(150) as u32;
                 let prefer_external = arguments.get("prefer_external").and_then(|v| v.as_bool()).unwrap_or(true);
 
-                let handler = self.handler.read().unwrap();
-                let metadata = match handler.get_metadata(doc_id) {
+                let metadata = match self.with_read_handler(|handler| handler.get_metadata(doc_id)) {
                     Ok(m) => m,
-                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: e.to_string(), annotations: None })], is_error: Some(true), meta: None },
+                    Err(e) => return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "text".into(), text: format!("{{\"success\":false,\"error\":\"{}\"}}", match e { ToolOutcome::Error { error, .. } => error, _ => "Failed to get metadata".to_string() }), annotations: None })], is_error: Some(true), meta: None },
                 };
 
                 let image_format = match format {
@@ -1486,27 +1563,33 @@ impl DocxToolsProvider {
             
             "get_document_structure" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.analyze_structure(doc_id) {
+                match self.with_read_handler(|handler| handler.analyze_structure(doc_id)) {
                     Ok(summary) => ToolOutcome::Metadata { metadata: summary },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None }
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "get_outline" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.get_outline(doc_id) {
+                match self.with_read_handler(|handler| handler.get_outline(doc_id)) {
                     Ok(outline) => ToolOutcome::Metadata { metadata: outline },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "get_ranges" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let selector = arguments["selector"].as_str().unwrap_or("");
-                let handler = self.handler.read().unwrap();
-                match handler.get_ranges(doc_id, selector) {
+                match self.with_read_handler(|handler| handler.get_ranges(doc_id, selector)) {
                     Ok(ranges) => ToolOutcome::Metadata { metadata: serde_json::json!({"ranges": ranges}) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             "replace_range_text" => {
@@ -1519,10 +1602,12 @@ impl DocxToolsProvider {
                         return CallToolResponse { content: vec![ToolResponseContent::Text(TextContent { content_type: "application/json".into(), text: serde_json::json!({"success": false, "code": ErrorCode::ValidationError, "error": format!("invalid range_id: {}", e)}).to_string(), annotations: None })], is_error: Some(true), meta: None };
                     }
                 };
-                let mut handler = self.handler.write().unwrap();
-                match handler.replace_range_text(doc_id, &range, text) {
+                match self.with_write_handler(|handler| handler.replace_range_text(doc_id, &range, text)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Range text replaced".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to replace range text"), hint: None },
+                    },
                 }
             },
             "set_table_cell_text" => {
@@ -1531,10 +1616,12 @@ impl DocxToolsProvider {
                 let r = arguments["row"].as_u64().unwrap_or(0) as usize;
                 let c = arguments["col"].as_u64().unwrap_or(0) as usize;
                 let text = arguments["text"].as_str().unwrap_or("");
-                let mut handler = self.handler.write().unwrap();
-                match handler.set_table_cell_text(doc_id, ti, r, c, text) {
+                match self.with_write_handler(|handler| handler.set_table_cell_text(doc_id, ti, r, c, text)) {
                     Ok(_) => ToolOutcome::Ok { message: Some("Table cell updated".into()) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::ValidationError, error: format!("Failed to set table cell text"), hint: None },
+                    },
                 }
             },
             
@@ -1555,9 +1642,7 @@ impl DocxToolsProvider {
             
             "get_word_count" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
-                
-                let handler = self.handler.read().unwrap();
-                match handler.extract_text(doc_id) {
+                match self.with_read_handler(|handler| handler.extract_text(doc_id)) {
                     Ok(text) => {
                         let words: Vec<&str> = text.split_whitespace().collect();
                         let characters = text.chars().count();
@@ -1575,7 +1660,10 @@ impl DocxToolsProvider {
                             "reading_time_minutes": (words.len() as f32 / 200.0).ceil() as usize
                         }) }
                     }
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None }
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             
@@ -1585,30 +1673,139 @@ impl DocxToolsProvider {
                 let case_sensitive = arguments.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(false);
                 let _whole_word = arguments.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false);
                 
-                let handler = self.handler.read().unwrap();
-                match handler.extract_text(doc_id) {
+                if search_term.is_empty() {
+                    return CallToolResponse {
+                        content: vec![ToolResponseContent::Text(TextContent {
+                            content_type: "text".into(),
+                            text: serde_json::json!({
+                                "success": false,
+                                "error": "Search term cannot be empty"
+                            }).to_string(),
+                            annotations: None,
+                        })],
+                        is_error: Some(true),
+                        meta: None,
+                    };
+                }
+                
+                match self.with_read_handler(|handler| handler.extract_text(doc_id)) {
                     Ok(text) => {
-                        let search_text = if case_sensitive { text.clone() } else { text.to_lowercase() };
+                        // Use a safer approach: search in the normalized text but track positions correctly
                         let search_for = if case_sensitive { search_term.to_string() } else { search_term.to_lowercase() };
                         
-                        let mut matches = Vec::new();
-                        let mut position = 0;
+                        if search_for.is_empty() {
+                            return CallToolResponse {
+                                content: vec![ToolResponseContent::Text(TextContent {
+                                    content_type: "text".into(),
+                                    text: serde_json::json!({
+                                        "success": false,
+                                        "error": "Search term cannot be empty"
+                                    }).to_string(),
+                                    annotations: None,
+                                })],
+                                is_error: Some(true),
+                                meta: None,
+                            };
+                        }
                         
-                        while let Some(found_pos) = search_text[position..].find(&search_for) {
-                            let absolute_pos = position + found_pos;
+                        let mut matches = Vec::new();
+                        
+                        // For case-insensitive search, we need to search in lowercase but use original positions
+                        if case_sensitive {
+                            // Case-sensitive: direct search
+                            let mut position = 0;
+                            while let Some(found_pos) = text[position..].find(&search_for) {
+                                let absolute_pos = position + found_pos;
+                                
+                                // Extract context around the match - ensure bounds are safe
+                                // Use char_indices to safely handle multi-byte characters
+                                let char_count = text.chars().count();
+                                let char_pos = absolute_pos.min(char_count);
+                                
+                                // Find character boundaries for context
+                                let context_start_char = char_pos.saturating_sub(50);
+                                let context_end_char = (char_pos + search_for.chars().count() + 50).min(char_count);
+                                
+                                if context_end_char > context_start_char {
+                                    let context: String = text.chars()
+                                        .skip(context_start_char)
+                                        .take(context_end_char - context_start_char)
+                                        .collect();
+                                    
+                                    let line = text.chars()
+                                        .take(char_pos)
+                                        .filter(|&c| c == '\n')
+                                        .count() + 1;
+                                    
+                                    matches.push(json!({
+                                        "position": absolute_pos,
+                                        "context": context,
+                                        "line": line
+                                    }));
+                                }
+                                
+                                // Advance position
+                                let next_pos = absolute_pos + search_for.len().max(1);
+                                if next_pos <= position || next_pos >= text.len() {
+                                    break;
+                                }
+                                position = next_pos;
+                                
+                                if matches.len() >= 1000 {
+                                    break;
+                                }
+                            }
+                        } else {
+                            // Case-insensitive: search in lowercase but map back to original
+                            let text_lower = text.to_lowercase();
+                            let mut position = 0;
                             
-                            // Extract context around the match
-                            let context_start = absolute_pos.saturating_sub(50);
-                            let context_end = (absolute_pos + search_for.len() + 50).min(text.len());
-                            let context = &text[context_start..context_end];
-                            
-                            matches.push(json!({
-                                "position": absolute_pos,
-                                "context": context,
-                                "line": text[..absolute_pos].matches('\n').count() + 1
-                            }));
-                            
-                            position = absolute_pos + search_for.len();
+                            while let Some(found_pos) = text_lower[position..].find(&search_for) {
+                                let absolute_pos = position + found_pos;
+                                
+                                // Ensure absolute_pos is within bounds
+                                if absolute_pos >= text.len() {
+                                    break;
+                                }
+                                
+                                // Extract context from original text using the same position
+                                // Use char_indices to safely handle multi-byte characters
+                                let char_count = text.chars().count();
+                                let char_pos = absolute_pos.min(char_count);
+                                
+                                // Find character boundaries for context
+                                let context_start_char = char_pos.saturating_sub(50);
+                                let context_end_char = (char_pos + search_for.chars().count() + 50).min(char_count);
+                                
+                                if context_end_char > context_start_char {
+                                    let context: String = text.chars()
+                                        .skip(context_start_char)
+                                        .take(context_end_char - context_start_char)
+                                        .collect();
+                                    
+                                    let line = text.chars()
+                                        .take(char_pos)
+                                        .filter(|&c| c == '\n')
+                                        .count() + 1;
+                                    
+                                    matches.push(json!({
+                                        "position": absolute_pos,
+                                        "context": context,
+                                        "line": line
+                                    }));
+                                }
+                                
+                                // Advance position
+                                let next_pos = absolute_pos + search_for.len().max(1);
+                                if next_pos <= position || next_pos >= text_lower.len() {
+                                    break;
+                                }
+                                position = next_pos;
+                                
+                                if matches.len() >= 1000 {
+                                    break;
+                                }
+                            }
                         }
                         
                         ToolOutcome::Metadata { metadata: serde_json::json!({
@@ -1616,7 +1813,10 @@ impl DocxToolsProvider {
                             "total_matches": matches.len()
                         }) }
                     }
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None }
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             
@@ -1624,8 +1824,7 @@ impl DocxToolsProvider {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let output_path = arguments["output_path"].as_str().unwrap_or("");
                 
-                let handler = self.handler.read().unwrap();
-                match handler.extract_text(doc_id) {
+                match self.with_read_handler(|handler| handler.extract_text(doc_id)) {
                     Ok(text) => {
                         // Simple conversion to Markdown - in full implementation would preserve formatting
                         let mut markdown = String::new();
@@ -1655,7 +1854,10 @@ impl DocxToolsProvider {
                             Err(e) => ToolOutcome::Error { code: ErrorCode::InternalError, error: format!("Failed to save file: {}", e), hint: None }
                         }
                     }
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None }
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
 
@@ -1663,8 +1865,7 @@ impl DocxToolsProvider {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
                 let output_path = arguments["output_path"].as_str().unwrap_or("");
                 
-                let handler = self.handler.read().unwrap();
-                match handler.extract_text(doc_id) {
+                match self.with_read_handler(|handler| handler.extract_text(doc_id)) {
                     Ok(text) => {
                         // Simple conversion to HTML - preserve headings heuristically
                         let mut html = String::from("<html><head><meta charset=\"utf-8\"></head><body>\n");
@@ -1690,7 +1891,10 @@ impl DocxToolsProvider {
                             Err(e) => ToolOutcome::Error { code: ErrorCode::InternalError, error: format!("Failed to save file: {}", e), hint: None }
                         }
                     }
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None }
+                    Err(e) => match e {
+                        ToolOutcome::Error { code: ErrorCode::InternalError, .. } => e,
+                        _ => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: format!("Document not found: {}", doc_id), hint: None },
+                    },
                 }
             },
             
@@ -1709,10 +1913,9 @@ impl DocxToolsProvider {
             },
             
             "get_storage_info" => {
-                let handler = self.handler.read().unwrap();
-                match handler.get_storage_info() {
+                match self.with_read_handler(|handler| handler.get_storage_info()) {
                     Ok(info) => ToolOutcome::Storage { storage: info.get("storage").cloned().unwrap_or(serde_json::json!({})) },
-                    Err(e) => ToolOutcome::Error { code: ErrorCode::InternalError, error: e.to_string(), hint: None },
+                    Err(e) => e,
                 }
             },
             
@@ -1739,7 +1942,9 @@ impl DocxToolsProvider {
                 if is_search_shape {
                     let mut obj = serde_json::json!({"success": true});
                     if let Some(map) = metadata.as_object() {
-                        for (k, v) in map { obj[&k[..]] = v.clone(); }
+                        for (k, v) in map { 
+                            obj[&k[..]] = v.clone(); 
+                        }
                     }
                     obj
                 } else {

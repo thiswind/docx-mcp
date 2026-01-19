@@ -174,6 +174,8 @@ impl DocxHandler {
         };
         
         self.documents.insert(doc_id.clone(), metadata);
+        // Initialize in_memory_ops for opened documents to support analysis tools
+        self.in_memory_ops.insert(doc_id.clone(), Vec::new());
         info!("Opened document from {:?} with ID: {}", path, doc_id);
         
         Ok(doc_id)
@@ -741,13 +743,13 @@ impl DocxHandler {
     }
 
     pub fn extract_text(&self, doc_id: &str) -> Result<String> {
-        let _metadata = self.documents.get(doc_id)
+        let metadata = self.documents.get(doc_id)
             .ok_or_else(|| anyhow::anyhow!("Document not found: {}", doc_id))?;
         
         // Use pure Rust text extraction
         use crate::pure_converter::PureRustConverter;
         let converter = PureRustConverter::new();
-        let text = converter.extract_text_from_docx(&self.documents.get(doc_id).unwrap().path)
+        let text = converter.extract_text_from_docx(&metadata.path)
             .with_context(|| format!("Failed to extract text from document {}", doc_id))?;
         
         Ok(text)
