@@ -71,7 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let json_val: serde_json::Value = serde_json::from_str(&t.text)?;
             if json_val["success"].as_bool().unwrap_or(false) {
                 let text = json_val["text"].as_str().unwrap_or("");
-                println!("   ✓ Text extracted successfully ({} characters)", text.len());
+                let char_count = text.chars().count();
+                println!("   ✓ Text extracted successfully ({} characters)", char_count);
                 // Safely get preview - use char_indices to avoid splitting multi-byte characters
                 let preview: String = text.chars().take(200).collect();
                 if !preview.is_empty() {
