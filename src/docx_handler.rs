@@ -801,13 +801,14 @@ impl DocxHandler {
     }
 
     /// List tables with resolved merges and sizes
-    /// Note: For read-only documents (opened from file), this returns empty results
-    /// as they don't have in_memory_ops. Future enhancement: extract from original document.
+    /// 
+    /// # Note
+    /// This function currently only works for documents created by this server (which have in_memory_ops).
+    /// For read-only documents opened from files, this function returns an error as the feature
+    /// to extract tables from original document files has not been implemented yet.
     pub fn get_tables_json(&self, doc_id: &str) -> Result<serde_json::Value> {
-        let ops = match self.in_memory_ops.get(doc_id) {
-            Some(ops) => ops,
-            None => return Ok(serde_json::json!({ "tables": [] })),
-        };
+        let ops = self.in_memory_ops.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("Table extraction is not yet supported for read-only documents opened from files. This feature requires in_memory_ops which are only available for documents created by this server."))?;
         let mut tables = Vec::new();
         for (ti, op) in ops.iter().enumerate() {
             if let DocxOp::Table { data } = op {
@@ -827,13 +828,14 @@ impl DocxHandler {
     }
 
     /// List images with basic metadata
-    /// Note: For read-only documents (opened from file), this returns empty results
-    /// as they don't have in_memory_ops. Future enhancement: extract from original document.
+    /// 
+    /// # Note
+    /// This function currently only works for documents created by this server (which have in_memory_ops).
+    /// For read-only documents opened from files, this function returns an error as the feature
+    /// to extract images from original document files has not been implemented yet.
     pub fn list_images(&self, doc_id: &str) -> Result<serde_json::Value> {
-        let ops = match self.in_memory_ops.get(doc_id) {
-            Some(ops) => ops,
-            None => return Ok(serde_json::json!({"images": []})),
-        };
+        let ops = self.in_memory_ops.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("Image extraction is not yet supported for read-only documents opened from files. This feature requires in_memory_ops which are only available for documents created by this server."))?;
         let mut images = Vec::new();
         for (i, op) in ops.iter().enumerate() {
             if let DocxOp::Image { width, height, alt_text, .. } = op {
@@ -844,13 +846,14 @@ impl DocxHandler {
     }
 
     /// List hyperlinks present in the in-memory ops
-    /// Note: For read-only documents (opened from file), this returns empty results
-    /// as they don't have in_memory_ops. Future enhancement: extract from original document.
+    /// 
+    /// # Note
+    /// This function currently only works for documents created by this server (which have in_memory_ops).
+    /// For read-only documents opened from files, this function returns an error as the feature
+    /// to extract hyperlinks from original document files has not been implemented yet.
     pub fn list_hyperlinks(&self, doc_id: &str) -> Result<serde_json::Value> {
-        let ops = match self.in_memory_ops.get(doc_id) {
-            Some(ops) => ops,
-            None => return Ok(serde_json::json!({"hyperlinks": []})),
-        };
+        let ops = self.in_memory_ops.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("Hyperlink extraction is not yet supported for read-only documents opened from files. This feature requires in_memory_ops which are only available for documents created by this server."))?;
         let mut links = Vec::new();
         for (i, op) in ops.iter().enumerate() {
             if let DocxOp::Hyperlink { text, url } = op {
