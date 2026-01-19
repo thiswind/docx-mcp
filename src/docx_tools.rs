@@ -1923,7 +1923,9 @@ impl DocxToolsProvider {
                                     if matches_search {
                                         // Check word boundary if whole_word is enabled
                                         if whole_word && !check_word_boundary(&text, char_pos, search_chars.len(), true) {
-                                            char_pos += 1;
+                                            // Advance by search term length to match case-sensitive behavior
+                                            // This ensures consistent result counts regardless of case sensitivity
+                                            char_pos += search_chars.len().max(1);
                                             continue;
                                         }
                                         
