@@ -1094,13 +1094,10 @@ pub struct MarginsSpec {
 
 impl DocxHandler {
     fn ensure_modifiable(&self, doc_id: &str) -> Result<()> {
-        let ops = self.in_memory_ops.get(doc_id)
-            .ok_or_else(|| anyhow::anyhow!("Modifications are supported only for documents created by this server (doc_id: {})", doc_id))?;
-        
-        // If in_memory_ops is empty, this is a read-only opened document, not a newly created one.
-        // Reject modifications to prevent data loss (write_docx would rebuild from empty ops).
-        if ops.is_empty() {
-            anyhow::bail!("Cannot modify read-only documents opened from file. Create a new document or use analysis tools instead.");
+        // Check if document exists in in_memory_ops map
+        // Newly created documents have the key present (even if empty), while opened documents don't
+        if !self.in_memory_ops.contains_key(doc_id) {
+            anyhow::bail!("Modifications are supported only for documents created by this server (doc_id: {}). Opened documents are read-only.", doc_id);
         }
         
         Ok(())

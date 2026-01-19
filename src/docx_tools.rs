@@ -1950,11 +1950,12 @@ impl DocxToolsProvider {
                                             }));
                                         }
                                         
+                                        // Advance position by search term length to prevent overlapping matches
+                                        // This matches the behavior of case-sensitive search for consistency
+                                        char_pos += search_chars.len().max(1);
+                                        
                                         if matches.len() >= 1000 {
-                                            // Exit loop when match limit reached
-                                            char_pos = text_chars.len(); // Force exit condition
-                                        } else {
-                                            char_pos += 1;
+                                            break;
                                         }
                                     } else {
                                         char_pos += 1;
