@@ -23,10 +23,21 @@ pub struct DocxToolsProvider {
 }
 
 impl DocxToolsProvider {
+    /// Create a new `DocxToolsProvider` with default security configuration.
+    ///
+    /// # Returns
+    /// A new `DocxToolsProvider` instance with default security settings.
     pub fn new() -> Self {
         Self::new_with_security(SecurityConfig::default())
     }
     
+    /// Create a new `DocxToolsProvider` with custom security configuration.
+    ///
+    /// # Arguments
+    /// * `security_config` - Security configuration specifying readonly mode, whitelist/blacklist, etc.
+    ///
+    /// # Returns
+    /// A new `DocxToolsProvider` instance with the specified security settings.
     pub fn new_with_security(security_config: SecurityConfig) -> Self {
         Self {
             handler: Arc::new(RwLock::new(DocxHandler::new().expect("Failed to create DocxHandler"))),
@@ -95,6 +106,14 @@ impl DocxToolsProvider {
 }
 
 impl DocxToolsProvider {
+    /// List all available MCP tools provided by this server.
+    ///
+    /// Returns a filtered list of tools based on the current security configuration.
+    /// Tools that are not allowed by the security settings will be excluded.
+    ///
+    /// # Returns
+    /// A vector of `Tool` structs describing each available tool, including its name,
+    /// description, and input schema.
     pub async fn list_tools(&self) -> Vec<Tool> {
         let mut all_tools = vec![
             Tool {
@@ -1005,6 +1024,19 @@ impl DocxToolsProvider {
         all_tools
     }
 
+    /// Execute an MCP tool with the given name and arguments.
+    ///
+    /// This method handles security checks, error handling, and converts tool outcomes
+    /// into MCP-compatible responses. All errors are properly caught and returned as
+    /// error responses rather than panicking.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the tool to execute (e.g., "create_document", "search_text")
+    /// * `arguments` - JSON value containing the tool's input parameters
+    ///
+    /// # Returns
+    /// A `CallToolResponse` containing either the successful result or an error message.
+    /// The response is always in JSON format suitable for MCP protocol communication.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> CallToolResponse {
         debug!("Calling tool: {} with arguments: {:?}", name, arguments);
         
