@@ -3,21 +3,30 @@ use docx_mcp::security::SecurityConfig;
 use mcp_core::types::ToolResponseContent;
 use serde_json::json;
 use std::path::PathBuf;
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Testing DocxToolsProvider search_text functionality ===\n");
     
-    // Create provider
-    let provider = DocxToolsProvider::new_with_security(SecurityConfig::default());
-    
-    // Test document path
-    let test_doc_path = PathBuf::from("/Users/thiswind/Documents/工作/信息学院工作/桌面文件夹/cursor_workspaces/03_Program_Development/docx-mcp/专家审查意见表-王红梅.docx");
+    // Get test document path from command line argument or environment variable
+    let test_doc_path = if let Some(arg) = env::args().nth(1) {
+        PathBuf::from(arg)
+    } else if let Ok(path) = env::var("TEST_DOCX_PATH") {
+        PathBuf::from(path)
+    } else {
+        eprintln!("Usage: {} <path_to_docx_file>", env::args().next().unwrap_or("test_search_text".to_string()));
+        eprintln!("Or set TEST_DOCX_PATH environment variable");
+        return Ok(());
+    };
     
     if !test_doc_path.exists() {
         eprintln!("Error: Test document not found at {:?}", test_doc_path);
         return Ok(());
     }
+    
+    // Create provider
+    let provider = DocxToolsProvider::new_with_security(SecurityConfig::default());
     
     println!("1. Opening document: {:?}", test_doc_path);
     let open_result = provider.call_tool("open_document", json!({

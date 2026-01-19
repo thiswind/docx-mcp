@@ -1743,16 +1743,20 @@ impl DocxToolsProvider {
                         let mut matches = Vec::new();
                         
                         // For case-insensitive search, we need to search in lowercase but use original positions
+                        // Helper function to convert byte offset to character index
+                        let byte_to_char_pos = |byte_offset: usize| -> usize {
+                            text[..byte_offset.min(text.len())].chars().count()
+                        };
+                        
                         if case_sensitive {
                             // Case-sensitive: direct search
-                            let mut position = 0;
-                            while let Some(found_pos) = text[position..].find(&search_for) {
-                                let absolute_pos = position + found_pos;
+                            let mut byte_position = 0;
+                            while let Some(found_pos) = text[byte_position..].find(&search_for) {
+                                let absolute_byte_pos = byte_position + found_pos;
                                 
-                                // Extract context around the match - ensure bounds are safe
-                                // Use char_indices to safely handle multi-byte characters
+                                // Convert byte offset to character index
+                                let char_pos = byte_to_char_pos(absolute_byte_pos);
                                 let char_count = text.chars().count();
-                                let char_pos = absolute_pos.min(char_count);
                                 
                                 // Find character boundaries for context
                                 let context_start_char = char_pos.saturating_sub(50);
@@ -1770,72 +1774,78 @@ impl DocxToolsProvider {
                                         .count() + 1;
                                     
                                     matches.push(json!({
-                                        "position": absolute_pos,
+                                        "position": char_pos,
                                         "context": context,
                                         "line": line
                                     }));
                                 }
                                 
-                                // Advance position
-                                let next_pos = absolute_pos + search_for.len().max(1);
-                                if next_pos <= position || next_pos >= text.len() {
+                                // Advance byte position
+                                let next_byte_pos = absolute_byte_pos + search_for.len().max(1);
+                                if next_byte_pos <= byte_position || next_byte_pos >= text.len() {
                                     break;
                                 }
-                                position = next_pos;
+                                byte_position = next_byte_pos;
                                 
                                 if matches.len() >= 1000 {
                                     break;
                                 }
                             }
                         } else {
-                            // Case-insensitive: search in lowercase but map back to original
-                            let text_lower = text.to_lowercase();
-                            let mut position = 0;
+                            // Case-insensitive: use character-based search to avoid byte/char mismatch
+                            // Convert both text and search term to lowercase character vectors for comparison
+                            let text_chars: Vec<char> = text.chars().collect();
+                            let search_chars: Vec<char> = search_for.chars().collect();
                             
-                            while let Some(found_pos) = text_lower[position..].find(&search_for) {
-                                let absolute_pos = position + found_pos;
-                                
-                                // Ensure absolute_pos is within bounds
-                                if absolute_pos >= text.len() {
-                                    break;
-                                }
-                                
-                                // Extract context from original text using the same position
-                                // Use char_indices to safely handle multi-byte characters
-                                let char_count = text.chars().count();
-                                let char_pos = absolute_pos.min(char_count);
-                                
-                                // Find character boundaries for context
-                                let context_start_char = char_pos.saturating_sub(50);
-                                let context_end_char = (char_pos + search_for.chars().count() + 50).min(char_count);
-                                
-                                if context_end_char > context_start_char {
-                                    let context: String = text.chars()
-                                        .skip(context_start_char)
-                                        .take(context_end_char - context_start_char)
-                                        .collect();
+                            if search_chars.is_empty() {
+                                // Skip empty search
+                            } else {
+                                let mut char_pos = 0;
+                                while char_pos + search_chars.len() <= text_chars.len() {
+                                    // Check if the substring matches (case-insensitive)
+                                    let matches_search = text_chars[char_pos..char_pos + search_chars.len()]
+                                        .iter()
+                                        .zip(search_chars.iter())
+                                        .all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()));
                                     
-                                    let line = text.chars()
-                                        .take(char_pos)
-                                        .filter(|&c| c == '\n')
-                                        .count() + 1;
+                                    if matches_search {
+                                        let char_count = text_chars.len();
+                                        
+                                        // Find character boundaries for context
+                                        let context_start_char = char_pos.saturating_sub(50);
+                                        let context_end_char = (char_pos + search_chars.len() + 50).min(char_count);
+                                        
+                                        if context_end_char > context_start_char {
+                                            let context: String = text_chars[context_start_char..context_end_char]
+                                                .iter()
+                                                .collect();
+                                            
+                                            let line = text_chars[..char_pos]
+                                                .iter()
+                                                .filter(|&&c| c == '\n')
+                                                .count() + 1;
+                                            
+                                            matches.push(json!({
+                                                "position": char_pos,
+                                                "context": context,
+                                                "line": line
+                                            }));
+                                        }
+                                        
+                                        if matches.len() >= 1000 {
+                                            // Exit loop when match limit reached
+                                            char_pos = text_chars.len(); // Force exit condition
+                                        } else {
+                                            char_pos += 1;
+                                        }
+                                    } else {
+                                        char_pos += 1;
+                                    }
                                     
-                                    matches.push(json!({
-                                        "position": absolute_pos,
-                                        "context": context,
-                                        "line": line
-                                    }));
-                                }
-                                
-                                // Advance position
-                                let next_pos = absolute_pos + search_for.len().max(1);
-                                if next_pos <= position || next_pos >= text_lower.len() {
-                                    break;
-                                }
-                                position = next_pos;
-                                
-                                if matches.len() >= 1000 {
-                                    break;
+                                    // Check exit condition
+                                    if char_pos + search_chars.len() > text_chars.len() {
+                                        break;
+                                    }
                                 }
                             }
                         }

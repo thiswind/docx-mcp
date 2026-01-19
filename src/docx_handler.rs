@@ -174,8 +174,11 @@ impl DocxHandler {
         };
         
         self.documents.insert(doc_id.clone(), metadata);
-        // Initialize in_memory_ops for opened documents to support analysis tools
-        self.in_memory_ops.insert(doc_id.clone(), Vec::new());
+        // Note: We intentionally do NOT initialize in_memory_ops for opened documents.
+        // This ensures that ensure_modifiable() will reject edit operations on read-only documents,
+        // preventing accidental data loss when write_docx() would rebuild from empty ops.
+        // Analysis tools (get_tables, list_images, etc.) that require in_memory_ops will need
+        // to be refactored to extract data from the original document file instead.
         info!("Opened document from {:?} with ID: {}", path, doc_id);
         
         Ok(doc_id)
@@ -798,9 +801,13 @@ impl DocxHandler {
     }
 
     /// List tables with resolved merges and sizes
+    /// Note: For read-only documents (opened from file), this returns empty results
+    /// as they don't have in_memory_ops. Future enhancement: extract from original document.
     pub fn get_tables_json(&self, doc_id: &str) -> Result<serde_json::Value> {
-        let ops = self.in_memory_ops.get(doc_id)
-            .ok_or_else(|| anyhow::anyhow!("No in-memory ops for document: {}", doc_id))?;
+        let ops = match self.in_memory_ops.get(doc_id) {
+            Some(ops) => ops,
+            None => return Ok(serde_json::json!({ "tables": [] })),
+        };
         let mut tables = Vec::new();
         for (ti, op) in ops.iter().enumerate() {
             if let DocxOp::Table { data } = op {
@@ -820,9 +827,13 @@ impl DocxHandler {
     }
 
     /// List images with basic metadata
+    /// Note: For read-only documents (opened from file), this returns empty results
+    /// as they don't have in_memory_ops. Future enhancement: extract from original document.
     pub fn list_images(&self, doc_id: &str) -> Result<serde_json::Value> {
-        let ops = self.in_memory_ops.get(doc_id)
-            .ok_or_else(|| anyhow::anyhow!("No in-memory ops for document: {}", doc_id))?;
+        let ops = match self.in_memory_ops.get(doc_id) {
+            Some(ops) => ops,
+            None => return Ok(serde_json::json!({"images": []})),
+        };
         let mut images = Vec::new();
         for (i, op) in ops.iter().enumerate() {
             if let DocxOp::Image { width, height, alt_text, .. } = op {
@@ -833,9 +844,13 @@ impl DocxHandler {
     }
 
     /// List hyperlinks present in the in-memory ops
+    /// Note: For read-only documents (opened from file), this returns empty results
+    /// as they don't have in_memory_ops. Future enhancement: extract from original document.
     pub fn list_hyperlinks(&self, doc_id: &str) -> Result<serde_json::Value> {
-        let ops = self.in_memory_ops.get(doc_id)
-            .ok_or_else(|| anyhow::anyhow!("No in-memory ops for document: {}", doc_id))?;
+        let ops = match self.in_memory_ops.get(doc_id) {
+            Some(ops) => ops,
+            None => return Ok(serde_json::json!({"hyperlinks": []})),
+        };
         let mut links = Vec::new();
         for (i, op) in ops.iter().enumerate() {
             if let DocxOp::Hyperlink { text, url } = op {
@@ -1079,9 +1094,15 @@ pub struct MarginsSpec {
 
 impl DocxHandler {
     fn ensure_modifiable(&self, doc_id: &str) -> Result<()> {
-        if !self.in_memory_ops.contains_key(doc_id) {
-            anyhow::bail!("Modifications are supported only for documents created by this server (doc_id: {})", doc_id);
+        let ops = self.in_memory_ops.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("Modifications are supported only for documents created by this server (doc_id: {})", doc_id))?;
+        
+        // If in_memory_ops is empty, this is a read-only opened document, not a newly created one.
+        // Reject modifications to prevent data loss (write_docx would rebuild from empty ops).
+        if ops.is_empty() {
+            anyhow::bail!("Cannot modify read-only documents opened from file. Create a new document or use analysis tools instead.");
         }
+        
         Ok(())
     }
 
