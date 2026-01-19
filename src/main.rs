@@ -5,6 +5,9 @@ use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use clap::Parser;
 
+mod security;
+#[cfg(feature = "runtime-server")]
+mod response;
 #[cfg(feature = "runtime-server")]
 mod docx_tools;
 #[cfg(feature = "runtime-server")]
@@ -15,7 +18,6 @@ mod converter;
 mod pure_converter;
 #[cfg(all(feature = "runtime-server", feature = "advanced-docx"))]
 mod advanced_docx;
-mod security;
 
 #[cfg(feature = "embedded-fonts")]
 mod fonts;
@@ -25,8 +27,9 @@ use docx_tools::DocxToolsProvider;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Configure tracing to output to stderr, not stdout (stdout is used for MCP protocol)
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(std::io::stderr))
         .with(EnvFilter::from_default_env())
         .init();
 
@@ -80,16 +83,33 @@ async fn main() -> Result<()> {
                 CapabilitiesBuilder::new().with_tools(true).build()
             }
             fn list_tools(&self) -> Vec<SpecTool> {
-                // DocxToolsProvider::list_tools is async; block briefly with tokio runtime handle
+                // DocxToolsProvider::list_tools is async; use a separate thread to avoid nested runtime
+                let provider = self.0.clone();
                 let rt = tokio::runtime::Handle::current();
-                let tools = rt.block_on(self.0.list_tools());
-                tools.into_iter().map(|t| SpecTool{ name: t.name, description: t.description.unwrap_or_default(), input_schema: t.input_schema }).collect()
+                // Spawn a new thread to run the async code, avoiding nested runtime issue
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let tools = rt.block_on(provider.list_tools());
+                    let _ = tx.send(tools);
+                });
+                // Handle errors gracefully to avoid panic
+                match rx.recv() {
+                    Ok(tools) => {
+                        tools.into_iter().map(|t| SpecTool{ name: t.name, description: t.description.unwrap_or_default(), input_schema: t.input_schema }).collect()
+                    }
+                    Err(e) => {
+                        eprintln!("Error receiving tools from thread: {}", e);
+                        vec![] // Return empty list on channel error instead of panicking
+                    }
+                }
             }
             fn call_tool(&self, tool_name: &str, arguments: JsonValue) -> Pin<Box<dyn Future<Output = Result<Vec<Content>, mcp_spec::handler::ToolError>> + Send + 'static>> {
                 let provider = self.0.clone();
                 let name = tool_name.to_string();
                 Box::pin(async move {
+                    // Call the tool - all errors should be handled internally
                     let resp = provider.call_tool(&name, arguments).await;
+                    
                     // Convert our CallToolResponse (text JSON) to Content::text
                     let text = match resp.content.get(0) {
                         Some(mcp_core::types::ToolResponseContent::Text(t)) => t.text.clone(),

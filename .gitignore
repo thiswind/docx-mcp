@@ -65,3 +65,5 @@ perf.data.old
 # Dependencies
 node_modules/
 vendor/
+# Cursor AI Agent Team Framework (submodule)
+cursor-agent-team
