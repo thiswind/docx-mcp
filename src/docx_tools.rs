@@ -98,7 +98,9 @@ impl DocxToolsProvider {
         // Detect specific error types from error messages
         let code = if error_lower.contains("document not found") || error_lower.contains("no in-memory ops") {
             ErrorCode::DocNotFound
-        } else if error_lower.contains("validation") || error_lower.contains("invalid") {
+        } else if error_lower.contains("validation") || error_lower.contains("invalid") 
+            || error_lower.contains("not supported") || error_lower.contains("read-only")
+            || error_lower.contains("not modifiable") {
             ErrorCode::ValidationError
         } else if error_lower.contains("security") || error_lower.contains("denied") {
             ErrorCode::SecurityDenied
